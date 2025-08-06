@@ -1,10 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar } from 'recharts';
 import Icon from '@/components/ui/icon';
 
 // Mock data generator for demonstration
@@ -28,6 +31,8 @@ const generateMockRequest = () => {
 
 const Index = () => {
   const [requests, setRequests] = useState<any[]>([]);
+  const [filteredRequests, setFilteredRequests] = useState<any[]>([]);
+  const [chartData, setChartData] = useState<any[]>([]);
   const [stats, setStats] = useState({
     total: 0,
     successful: 0,
@@ -35,27 +40,98 @@ const Index = () => {
     avgResponseTime: 0
   });
   const [isLive, setIsLive] = useState(true);
+  const [filters, setFilters] = useState({
+    ip: '',
+    domain: '',
+    method: '',
+    statusCode: '',
+    minResponseTime: 0
+  });
+  const wsRef = useRef<WebSocket | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
 
-  useEffect(() => {
-    // Initialize with some mock data
-    const initialRequests = Array.from({ length: 10 }, generateMockRequest);
-    setRequests(initialRequests);
-    updateStats(initialRequests);
-
-    // Simulate real-time updates
-    const interval = setInterval(() => {
-      if (isLive) {
-        const newRequest = generateMockRequest();
-        setRequests(prev => [newRequest, ...prev.slice(0, 99)]); // Keep last 100 requests
-      }
-    }, 2000);
-
-    return () => clearInterval(interval);
+  // WebSocket connection setup
+  const connectWebSocket = useCallback(() => {
+    try {
+      // Simulate WebSocket connection to dstat server
+      const wsUrl = `ws://77.110.99.3:8080/ws`;
+      wsRef.current = new WebSocket(wsUrl);
+      
+      wsRef.current.onopen = () => {
+        console.log('WebSocket connected to dstat server');
+        setWsConnected(true);
+      };
+      
+      wsRef.current.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          const newRequest = {
+            ...data,
+            id: Math.random().toString(36).substr(2, 9),
+            timestamp: new Date()
+          };
+          setRequests(prev => [newRequest, ...prev.slice(0, 199)]); // Keep last 200 requests
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+        }
+      };
+      
+      wsRef.current.onerror = () => {
+        console.log('WebSocket error, falling back to mock data');
+        setWsConnected(false);
+      };
+      
+      wsRef.current.onclose = () => {
+        console.log('WebSocket disconnected');
+        setWsConnected(false);
+        // Attempt to reconnect after 5 seconds
+        setTimeout(() => {
+          if (isLive) connectWebSocket();
+        }, 5000);
+      };
+    } catch (error) {
+      console.log('WebSocket not available, using mock data');
+      setWsConnected(false);
+    }
   }, [isLive]);
 
   useEffect(() => {
+    // Initialize with some mock data
+    const initialRequests = Array.from({ length: 20 }, generateMockRequest);
+    setRequests(initialRequests);
+    updateStats(initialRequests);
+    updateChartData(initialRequests);
+
+    // Try to connect WebSocket, fallback to mock data
+    if (isLive) {
+      connectWebSocket();
+    }
+
+    // Fallback: simulate real-time updates if WebSocket fails
+    const interval = setInterval(() => {
+      if (isLive && !wsConnected) {
+        const newRequest = generateMockRequest();
+        setRequests(prev => [newRequest, ...prev.slice(0, 199)]);
+      }
+    }, 2000);
+
+    return () => {
+      clearInterval(interval);
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [isLive, connectWebSocket, wsConnected]);
+
+  useEffect(() => {
     updateStats(requests);
+    updateChartData(requests);
+    applyFilters();
   }, [requests]);
+
+  useEffect(() => {
+    applyFilters();
+  }, [filters, requests]);
 
   const updateStats = (requestsList: any[]) => {
     if (requestsList.length === 0) return;
@@ -68,6 +144,81 @@ const Index = () => {
     );
 
     setStats({ total, successful, errors, avgResponseTime });
+  };
+
+  const updateChartData = (requestsList: any[]) => {
+    // Group requests by minute for chart
+    const groupedData = requestsList.reduce((acc, req) => {
+      const minute = new Date(req.timestamp).toLocaleTimeString('ru-RU', { 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      });
+      
+      if (!acc[minute]) {
+        acc[minute] = {
+          time: minute,
+          requests: 0,
+          successful: 0,
+          errors: 0,
+          avgResponseTime: 0,
+          totalResponseTime: 0
+        };
+      }
+      
+      acc[minute].requests += 1;
+      acc[minute].totalResponseTime += req.responseTime;
+      acc[minute].avgResponseTime = Math.round(acc[minute].totalResponseTime / acc[minute].requests);
+      
+      if (req.status >= 200 && req.status < 400) {
+        acc[minute].successful += 1;
+      } else {
+        acc[minute].errors += 1;
+      }
+      
+      return acc;
+    }, {} as any);
+
+    const chartDataArray = Object.values(groupedData)
+      .sort((a: any, b: any) => a.time.localeCompare(b.time))
+      .slice(-20); // Last 20 minutes
+
+    setChartData(chartDataArray);
+  };
+
+  const applyFilters = () => {
+    let filtered = [...requests];
+
+    if (filters.ip) {
+      filtered = filtered.filter(req => req.ip.includes(filters.ip));
+    }
+
+    if (filters.domain) {
+      filtered = filtered.filter(req => req.url.includes(filters.domain));
+    }
+
+    if (filters.method) {
+      filtered = filtered.filter(req => req.method === filters.method);
+    }
+
+    if (filters.statusCode) {
+      filtered = filtered.filter(req => req.status.toString().startsWith(filters.statusCode));
+    }
+
+    if (filters.minResponseTime > 0) {
+      filtered = filtered.filter(req => req.responseTime >= filters.minResponseTime);
+    }
+
+    setFilteredRequests(filtered);
+  };
+
+  const clearFilters = () => {
+    setFilters({
+      ip: '',
+      domain: '',
+      method: '',
+      statusCode: '',
+      minResponseTime: 0
+    });
   };
 
   const getStatusColor = (status: number) => {
@@ -98,9 +249,15 @@ const Index = () => {
             <p className="text-slate-400">Сервер: 77.110.99.3 • Режим реального времени</p>
           </div>
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <div className={`w-3 h-3 rounded-full ${isLive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-              <span className="text-sm">{isLive ? 'Online' : 'Offline'}</span>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <div className={`w-3 h-3 rounded-full ${isLive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                <span className="text-sm">{isLive ? 'Live' : 'Paused'}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className={`w-3 h-3 rounded-full ${wsConnected ? 'bg-blue-500 animate-pulse' : 'bg-gray-500'}`}></div>
+                <span className="text-sm">{wsConnected ? 'WebSocket' : 'Mock Data'}</span>
+              </div>
             </div>
             <Button 
               variant={isLive ? "destructive" : "default"} 
@@ -187,19 +344,246 @@ const Index = () => {
         </TabsList>
 
         <TabsContent value="monitoring" className="space-y-6">
-          {/* Real-time Requests Chart */}
+          {/* Traffic Charts */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            <Card className="bg-slate-800 border-slate-700">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Icon name="TrendingUp" size={20} className="text-blue-400" />
+                  Трафик по времени
+                </CardTitle>
+                <CardDescription>Количество запросов за последние 20 минут</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                      <XAxis 
+                        dataKey="time" 
+                        stroke="#9CA3AF"
+                        fontSize={12}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        stroke="#9CA3AF"
+                        fontSize={12}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        contentStyle={{
+                          backgroundColor: '#1E293B',
+                          border: '1px solid #334155',
+                          borderRadius: '6px',
+                          color: '#F8FAFC'
+                        }}
+                      />
+                      <Area 
+                        type="monotone" 
+                        dataKey="requests" 
+                        stroke="#3B82F6" 
+                        fill="#3B82F6" 
+                        fillOpacity={0.2}
+                        strokeWidth={2}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-slate-800 border-slate-700">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Icon name="Zap" size={20} className="text-purple-400" />
+                  Время ответа
+                </CardTitle>
+                <CardDescription>Среднее время ответа по минутам</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                      <XAxis 
+                        dataKey="time" 
+                        stroke="#9CA3AF"
+                        fontSize={12}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        stroke="#9CA3AF"
+                        fontSize={12}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        contentStyle={{
+                          backgroundColor: '#1E293B',
+                          border: '1px solid #334155',
+                          borderRadius: '6px',
+                          color: '#F8FAFC'
+                        }}
+                        formatter={(value) => [`${value}ms`, 'Время ответа']}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="avgResponseTime" 
+                        stroke="#A855F7" 
+                        strokeWidth={3}
+                        dot={{ fill: '#A855F7', strokeWidth: 0, r: 4 }}
+                        activeDot={{ r: 6, fill: '#A855F7' }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className="bg-slate-800 border-slate-700">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Icon name="BarChart3" size={20} className="text-green-400" />
+                Успешные vs Ошибки
+              </CardTitle>
+              <CardDescription>Соотношение успешных запросов и ошибок</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                    <XAxis 
+                      dataKey="time" 
+                      stroke="#9CA3AF"
+                      fontSize={12}
+                      tickLine={false}
+                    />
+                    <YAxis 
+                      stroke="#9CA3AF"
+                      fontSize={12}
+                      tickLine={false}
+                    />
+                    <Tooltip 
+                      contentStyle={{
+                        backgroundColor: '#1E293B',
+                        border: '1px solid #334155',
+                        borderRadius: '6px',
+                        color: '#F8FAFC'
+                      }}
+                    />
+                    <Bar dataKey="successful" fill="#10B981" name="Успешные" />
+                    <Bar dataKey="errors" fill="#EF4444" name="Ошибки" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Filters */}
+          <Card className="bg-slate-800 border-slate-700">
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Icon name="Filter" size={20} className="text-orange-400" />
+                  Фильтры
+                </div>
+                <Button onClick={clearFilters} variant="outline" size="sm">
+                  <Icon name="X" size={16} className="mr-1" />
+                  Очистить
+                </Button>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-slate-300 mb-2 block">IP адрес</label>
+                  <Input
+                    placeholder="192.168.1.1"
+                    value={filters.ip}
+                    onChange={(e) => setFilters(prev => ({ ...prev, ip: e.target.value }))}
+                    className="bg-slate-700 border-slate-600 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-300 mb-2 block">Домен</label>
+                  <Input
+                    placeholder="api.example.com"
+                    value={filters.domain}
+                    onChange={(e) => setFilters(prev => ({ ...prev, domain: e.target.value }))}
+                    className="bg-slate-700 border-slate-600 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-300 mb-2 block">HTTP метод</label>
+                  <Select value={filters.method} onValueChange={(value) => setFilters(prev => ({ ...prev, method: value }))}>
+                    <SelectTrigger className="bg-slate-700 border-slate-600 text-white">
+                      <SelectValue placeholder="Все методы" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Все методы</SelectItem>
+                      <SelectItem value="GET">GET</SelectItem>
+                      <SelectItem value="POST">POST</SelectItem>
+                      <SelectItem value="PUT">PUT</SelectItem>
+                      <SelectItem value="DELETE">DELETE</SelectItem>
+                      <SelectItem value="PATCH">PATCH</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-300 mb-2 block">Статус код</label>
+                  <Select value={filters.statusCode} onValueChange={(value) => setFilters(prev => ({ ...prev, statusCode: value }))}>
+                    <SelectTrigger className="bg-slate-700 border-slate-600 text-white">
+                      <SelectValue placeholder="Все коды" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Все коды</SelectItem>
+                      <SelectItem value="2">2xx (Успешные)</SelectItem>
+                      <SelectItem value="3">3xx (Перенаправления)</SelectItem>
+                      <SelectItem value="4">4xx (Клиентские ошибки)</SelectItem>
+                      <SelectItem value="5">5xx (Серверные ошибки)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-300 mb-2 block">Мин. время (мс)</label>
+                  <Input
+                    type="number"
+                    placeholder="0"
+                    value={filters.minResponseTime || ''}
+                    onChange={(e) => setFilters(prev => ({ ...prev, minResponseTime: parseInt(e.target.value) || 0 }))}
+                    className="bg-slate-700 border-slate-600 text-white"
+                  />
+                </div>
+              </div>
+              {(filters.ip || filters.domain || filters.method || filters.statusCode || filters.minResponseTime > 0) && (
+                <div className="mt-4 p-3 bg-slate-700 rounded-lg">
+                  <p className="text-sm text-slate-300">
+                    Найдено запросов: <span className="font-bold text-blue-400">{filteredRequests.length}</span> из {requests.length}
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Real-time Requests */}
           <Card className="bg-slate-800 border-slate-700">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Icon name="Activity" size={20} className="text-blue-400" />
                 Запросы в реальном времени
               </CardTitle>
-              <CardDescription>Последние HTTP/HTTPS запросы с сервера</CardDescription>
+              <CardDescription>
+                Последние HTTP/HTTPS запросы с сервера 
+                {(filters.ip || filters.domain || filters.method || filters.statusCode || filters.minResponseTime > 0) 
+                  ? '(с учетом фильтров)' 
+                  : ''}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {requests.slice(0, 8).map((request) => (
-                  <div key={request.id} className="flex items-center justify-between p-4 bg-slate-700 rounded-lg">
+                {(filteredRequests.length > 0 ? filteredRequests : requests).slice(0, 8).map((request) => (
+                  <div key={request.id} className="flex items-center justify-between p-4 bg-slate-700 rounded-lg hover:bg-slate-600 transition-colors">
                     <div className="flex items-center gap-4">
                       <Badge className={`${getMethodColor(request.method)} text-white border-0`}>
                         {request.method}
@@ -224,6 +608,12 @@ const Index = () => {
                     </div>
                   </div>
                 ))}
+                {filteredRequests.length === 0 && (filters.ip || filters.domain || filters.method || filters.statusCode || filters.minResponseTime > 0) && (
+                  <div className="text-center py-8 text-slate-400">
+                    <Icon name="Search" size={48} className="mx-auto mb-4 opacity-50" />
+                    <p>Нет запросов, соответствующих выбранным фильтрам</p>
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -287,8 +677,13 @@ const Index = () => {
         <TabsContent value="logs">
           <Card className="bg-slate-800 border-slate-700">
             <CardHeader>
-              <CardTitle>Подробные логи запросов</CardTitle>
-              <CardDescription>Полная информация о HTTP/HTTPS запросах</CardDescription>
+              <CardTitle className="flex items-center justify-between">
+                <div>Подробные логи запросов</div>
+                <Badge variant="outline" className="text-slate-300">
+                  {(filteredRequests.length > 0 ? filteredRequests : requests).length} записей
+                </Badge>
+              </CardTitle>
+              <CardDescription>Полная информация о HTTP/HTTPS запросах {(filters.ip || filters.domain || filters.method || filters.statusCode || filters.minResponseTime > 0) ? '(с учетом фильтров)' : ''}</CardDescription>
             </CardHeader>
             <CardContent>
               <Table>
@@ -304,8 +699,8 @@ const Index = () => {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {requests.slice(0, 15).map((request) => (
-                    <TableRow key={request.id}>
+                  {(filteredRequests.length > 0 ? filteredRequests : requests).slice(0, 25).map((request) => (
+                    <TableRow key={request.id} className="hover:bg-slate-700 transition-colors">
                       <TableCell className="font-mono text-xs">
                         {request.timestamp.toLocaleTimeString()}
                       </TableCell>
@@ -314,8 +709,10 @@ const Index = () => {
                           {request.method}
                         </Badge>
                       </TableCell>
-                      <TableCell className="font-mono text-xs max-w-xs truncate">
-                        {request.url}
+                      <TableCell className="font-mono text-xs max-w-xs">
+                        <div className="truncate" title={request.url}>
+                          {request.url}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
@@ -325,7 +722,11 @@ const Index = () => {
                       </TableCell>
                       <TableCell className="font-mono text-xs">{request.ip}</TableCell>
                       <TableCell className="text-xs">{Math.round(request.size / 1024)}KB</TableCell>
-                      <TableCell className="font-mono text-xs">{request.responseTime}ms</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        <span className={request.responseTime > 1000 ? 'text-red-400' : request.responseTime > 500 ? 'text-yellow-400' : 'text-green-400'}>
+                          {request.responseTime}ms
+                        </span>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -408,24 +809,30 @@ const Index = () => {
 
             <Card className="bg-slate-800 border-slate-700">
               <CardHeader>
-                <CardTitle>Фильтры</CardTitle>
+                <CardTitle>WebSocket соединение</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div>
-                  <label className="text-sm font-medium">Показывать только ошибки</label>
-                  <div className="mt-2">
-                    <input type="checkbox" className="mr-2" />
-                    <span className="text-sm">Статус коды 4xx и 5xx</span>
-                  </div>
+                <div className="flex items-center gap-3">
+                  <div className={`w-4 h-4 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                  <span className={`font-medium ${wsConnected ? 'text-green-400' : 'text-red-400'}`}>
+                    {wsConnected ? 'Подключено' : 'Отключено'}
+                  </span>
                 </div>
                 <div>
-                  <label className="text-sm font-medium">Минимальное время ответа (мс)</label>
+                  <label className="text-sm font-medium">WebSocket URL</label>
                   <input 
-                    type="number" 
-                    defaultValue="0" 
-                    className="w-full p-2 mt-1 bg-slate-700 border border-slate-600 rounded-md text-white"
+                    type="text" 
+                    value="ws://77.110.99.3:8080/ws" 
+                    className="w-full p-2 mt-1 bg-slate-700 border border-slate-600 rounded-md text-white font-mono text-sm"
+                    readOnly
                   />
                 </div>
+                <p className="text-sm text-slate-400">
+                  {wsConnected 
+                    ? 'Получение данных в реальном времени от dstat'
+                    : 'Соединение недоступно, используются демо-данные'
+                  }
+                </p>
               </CardContent>
             </Card>
           </div>
